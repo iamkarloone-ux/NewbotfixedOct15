@@ -8,7 +8,8 @@ module.exports = {
     VERIFY_TOKEN: "pinkGuineaFowl_onpella_2025",
     ADMIN_ID: "9022271741140377",
     GEMINI_API_KEY: "AIzaSyAaF1PIIgkph1RqKdqN7xH1HyFXwXOEULc",
-    KAIZ_API_KEY: "732ce71f-4761-474d-adf2-5cd2d315ad18", // Your new Kaiz-APIs key
+        // ADD THIS NEW KEY
+    OPENROUTER_API_KEY: "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",
     BOT_URL: "https://apiworker.onrender.com", 
 
     // A secure, random password that the Python worker uses to talk to your bot.
