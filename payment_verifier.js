@@ -1,40 +1,43 @@
-// payment_verifier.js (Gemini Only - Direct Connection)
+// payment_verifier.js (OpenRouter Version - Multi-Model Support)
 const axios = require('axios');
 const sharp = require('sharp');
 const secrets = require('./secrets.js');
 
-const GEMINI_API_KEY = secrets.GEMINI_API_KEY;
-const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=";
+const API_KEY = secrets.OPENROUTER_API_KEY;
+const API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-// Strict prompt to ensure Gemini returns exactly what the bot needs
+// We use Llama 3.2 Vision. It's fast, functional, and often free.
+// Alternative: "openai/gpt-4o-mini" (Very accurate but costs pennies)
+const MODEL_NAME = "meta-llama/llama-3.2-11b-vision-instruct:free";
+
 const ANALYSIS_PROMPT = `
 ACT AS A GCASH RECEIPT SCANNER.
-1. Find the 13-digit Reference Number (e.g., 0123 456 789 123).
-2. Find the Amount Sent (PHP).
-3. Check if the receipt looks edited or fake.
+Look at the image and find:
+1. The 13-digit Reference Number (e.g., 0011 222 333 444).
+2. The exact Amount Sent in PHP.
 
-YOU MUST RESPOND ONLY WITH A JSON OBJECT. NO MARKDOWN. NO INTRO TEXT.
+OUTPUT ONLY VALID JSON. DO NOT ADD TEXT OR MARKDOWN.
 {
     "extracted_info": {
-        "reference_number": "13DIGITS_ONLY_NO_SPACES",
+        "reference_number": "13DIGITS_ONLY",
         "amount": "NUMBER_ONLY",
-        "date": "TEXT_DATE"
+        "date": "DATE_TEXT"
     },
     "verification_status": "APPROVED",
-    "reasoning": "Explain shortly"
+    "reasoning": "Quick note"
 }
 `;
 
 /**
- * Compresses and converts image to Base64
+ * Optimizes the image for AI processing
  */
 async function encodeImage(imageBuffer) {
     try {
-        let resizedBuffer = await sharp(imageBuffer)
-            .resize({ width: 800, withoutEnlargement: true })
-            .png()
+        const resized = await sharp(imageBuffer)
+            .resize({ width: 800 })
+            .toFormat('jpeg')
             .toBuffer();
-        return resizedBuffer.toString('base64');
+        return resized.toString('base64');
     } catch (error) {
         console.error("Image processing error:", error);
         return null;
@@ -42,74 +45,76 @@ async function encodeImage(imageBuffer) {
 }
 
 /**
- * Cleans AI response and extracts the JSON block
+ * Extracts JSON from the AI response (strips markdown if needed)
  */
 function cleanAndParseJSON(text) {
     try {
-        // Remove markdown formatting if AI provides it
-        let cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
-        
-        // Find the start { and end }
-        const start = cleaned.indexOf('{');
-        const end = cleaned.lastIndexOf('}');
-        
-        if (start !== -1 && end !== -1) {
-            cleaned = cleaned.substring(start, end + 1);
+        const jsonMatch = text.match(/({[\s\S]*})/);
+        if (jsonMatch && jsonMatch[0]) {
+            let cleaned = jsonMatch[0];
             const parsed = JSON.parse(cleaned);
             
-            // Auto-fix: Remove spaces from reference number (e.g. "0123 456..." -> "0123456...")
+            // Critical: Remove spaces from the reference number
             if (parsed.extracted_info?.reference_number) {
                 parsed.extracted_info.reference_number = String(parsed.extracted_info.reference_number).replace(/\s/g, "");
             }
             return parsed;
         }
-        throw new Error("No JSON boundaries found");
     } catch (e) {
-        console.error("AI Response Parsing Failed. Raw text was:", text);
-        return null;
+        console.error("Failed to parse AI JSON. Output was:", text);
     }
+    return null;
 }
 
 /**
- * Main Function: Sends image direct to Google Gemini
+ * Main Function: Sends image to OpenRouter
  */
 async function analyzeReceiptWithFallback(imageUrl, image_b64) {
-    if (!image_b64) {
-        return {
-            extracted_info: { reference_number: "Not Found" },
-            verification_status: "REJECTED",
-            reasoning: "No image data received."
-        };
-    }
+    if (!image_b64) return null;
 
     const payload = {
-        "contents": [{
-            "parts": [
-                { "text": ANALYSIS_PROMPT },
-                { "inline_data": { "mime_type": "image/png", "data": image_b64 } }
-            ]
-        }]
+        model: MODEL_NAME,
+        messages: [
+            {
+                role: "user",
+                content: [
+                    { type: "text", text: ANALYSIS_PROMPT },
+                    {
+                        type: "image_url",
+                        image_url: {
+                            url: `data:image/jpeg;base64,${image_b64}`
+                        }
+                    }
+                ]
+            }
+        ]
     };
 
     try {
-        console.log("[AI] Analyzing receipt with Gemini Direct...");
-        const response = await axios.post(`${BASE_URL}${GEMINI_API_KEY}`, payload, { timeout: 40000 });
-        
-        const aiText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        console.log(`[AI] Analyzing with ${MODEL_NAME} via OpenRouter...`);
+        const response = await axios.post(API_URL, payload, {
+            headers: {
+                "Authorization": `Bearer ${API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            timeout: 45000
+        });
+
+        const aiText = response.data?.choices?.[0]?.message?.content;
         
         if (aiText) {
             const result = cleanAndParseJSON(aiText);
             if (result) return result;
         }
 
-        throw new Error("Empty or invalid response from Gemini.");
+        throw new Error("AI response was empty or malformed.");
 
     } catch (error) {
-        console.error("Gemini API Error:", error.message);
+        console.error("OpenRouter API Error:", error.response?.data || error.message);
         return {
-            extracted_info: { reference_number: "Not Found", amount: "Not Found" },
+            extracted_info: { reference_number: "Not Found" },
             verification_status: "REJECTED",
-            reasoning: "The AI was unable to scan this receipt. Please try again or contact admin."
+            reasoning: "AI Error: Could not scan receipt."
         };
     }
 }
