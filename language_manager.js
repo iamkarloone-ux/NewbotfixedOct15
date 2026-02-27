@@ -1,4 +1,4 @@
-// language_manager.js (Fixed Pathing & Safe Load)
+// language_manager.js (Fixed Pathing for 'locales' folder)
 const fs = require('fs');
 const path = require('path');
 
@@ -6,15 +6,15 @@ let enData = {};
 let tlData = {};
 
 try {
-    // FIXED: Changed from 'locales/en.json' to just 'en.json' based on your file structure
-    enData = JSON.parse(fs.readFileSync(path.join(__dirname, 'en.json'), 'utf8'));
+    // FIXED: Tells the bot to look inside the 'locales' folder for en.json
+    enData = JSON.parse(fs.readFileSync(path.join(__dirname, 'locales', 'en.json'), 'utf8'));
 } catch (e) {
     console.error("Warning: Could not load en.json. Check file path.", e.message);
 }
 
 try {
-    // FIXED: Changed from 'locales/tl.json' to just 'tl.json' based on your file structure
-    tlData = JSON.parse(fs.readFileSync(path.join(__dirname, 'tl.json'), 'utf8'));
+    // FIXED: Tells the bot to look inside the 'locales' folder for tl.json
+    tlData = JSON.parse(fs.readFileSync(path.join(__dirname, 'locales', 'tl.json'), 'utf8'));
 } catch (e) {
     console.error("Warning: Could not load tl.json. Check file path.", e.message);
 }
