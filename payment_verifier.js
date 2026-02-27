@@ -1,122 +1,159 @@
-// payment_verifier.js
+// payment_verifier.js (Updated with Norch Project API)
 const axios = require('axios');
 const sharp = require('sharp');
 const secrets = require('./secrets.js');
 
-const API_KEY = secrets.GEMINI_API_KEY;
+// KAIZ_API_KEY is no longer needed for the new API
+const GEMINI_API_KEY = secrets.GEMINI_API_KEY;
 
-/**
- * We use the model string from the latest documentation.
- * This ensures we are using the most "functional" multimodal version.
- */
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
+const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=";
 
-const ANALYSIS_PROMPT = `
-ACT AS AN EXPERT GCASH RECEIPT SCANNER.
-Scan the image carefully for:
-1. The Reference Number: Look for exactly 13 digits (e.g. 0123 456 789 123).
-2. The Amount Sent: The total PHP value.
-3. Authenticity: Check if the receipt looks edited or fake.
-
-YOU MUST REPLY ONLY WITH A VALID JSON OBJECT. NO MARKDOWN. NO INTRO TEXT.
+const GEMINI_ANALYSIS_PROMPT = `
+You are a highly-attentive payment verification assistant. Your task is to analyze payment receipt screenshots to check for legitimacy.
+INSTRUCTIONS:
+1.  Read all visible text from the receipt, paying close attention to Reference Number and Amount Sent.
+2.  Critically assess the image for signs of digital manipulation.
+3.  Make a final recommendation: APPROVED, FLAGGED, or REJECTED.
+Respond in this exact JSON format. Do not include any other text, comments, or markdown formatting.
 {
     "extracted_info": {
-        "reference_number": "13DIGITS_ONLY_NO_SPACES",
-        "amount": "NUMBER_ONLY",
-        "date": "DATE_AND_TIME"
+        "reference_number": "The 13-digit reference number you read, or 'Not Found'",
+        "amount": "The amount you read, or 'Not Found'",
+        "date": "The date and time you read, or 'Not Found'"
     },
-    "verification_status": "APPROVED",
-    "reasoning": "Quick scan results"
+    "verification_status": "APPROVED/FLAGGED/REJECTED",
+    "reasoning": "A brief but specific explanation for your decision."
 }
 `;
 
-/**
- * Sharpens and encodes the image into Base64 (JPEG) as required by the API.
- */
+const PRIMARY_ANALYSIS_PROMPT = `
+CRITICAL INSTRUCTION: Analyze the provided GCash receipt. YOU MUST ONLY reply with a valid JSON object in the specified format. Do not add any introductory text, markdown, or explanations. Your entire response must be the JSON object itself.
+
+{
+    "extracted_info": {
+        "reference_number": "The 13-digit reference number, or 'Not Found'",
+        "amount": "The amount, or 'Not Found'",
+        "date": "The date and time, or 'Not Found'"
+    },
+    "verification_status": "APPROVED/FLAGGED/REJECTED",
+    "reasoning": "A brief explanation for your decision."
+}
+`;
+
 async function encodeImage(imageBuffer) {
     try {
-        const resized = await sharp(imageBuffer)
-            .resize({ width: 1024 }) // Optimal size for OCR
-            .toFormat('jpeg')
+        let resizedBuffer = await sharp(imageBuffer)
+            .resize({ width: 1024, withoutEnlargement: true })
+            .png()
             .toBuffer();
-        return resized.toString('base64');
+
+        return resizedBuffer.toString('base64');
     } catch (error) {
         console.error("Image processing error:", error);
         return null;
     }
 }
 
-/**
- * Cleans AI response and extracts the JSON block to prevent parsing errors.
- */
-function cleanAndParseJSON(text) {
-    try {
-        const jsonMatch = text.match(/({[\s\S]*})/);
-        if (jsonMatch && jsonMatch[0]) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            
-            // Critical: Remove any non-digits from the reference number
-            if (parsed.extracted_info?.reference_number) {
-                parsed.extracted_info.reference_number = String(parsed.extracted_info.reference_number).replace(/\D/g, "");
-            }
-            return parsed;
-        }
-    } catch (e) {
-        console.error("JSON Error. AI output was:", text);
-    }
-    return null;
-}
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Main function: Sends the multimodal prompt to Gemini.
- */
-async function analyzeReceiptWithFallback(imageUrl, image_b64) {
-    if (!image_b64) return null;
-
-    // This payload follows the exact structure of the curl command in your image.
+// --- Fallback (Google Gemini Direct) ---
+async function sendGeminiRequest(image_b64) {
     const payload = {
-        contents: [{
-            parts: [
-                {
-                    inline_data: {
-                        mime_type: "image/jpeg",
-                        data: image_b64
-                    }
-                },
-                { text: ANALYSIS_PROMPT }
+        "contents": [{
+            "parts": [
+                { "text": GEMINI_ANALYSIS_PROMPT },
+                { "inline_data": { "mime_type": "image/png", "data": image_b64 } }
             ]
-        }],
-        generationConfig: {
-            temperature: 0.1, // High precision
-            response_mime_type: "application/json" // Force JSON output
-        }
+        }]
     };
 
     try {
-        console.log(`[AI] Analyzing receipt with Flash Multimodal API...`);
-        const response = await axios.post(API_URL, payload, {
-            headers: { "Content-Type": "application/json" },
-            timeout: 35000
-        });
-
-        // The text result is located in candidates[0].content.parts[0].text
-        const aiText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        console.log(`Sending request to Gemini Vision API...`);
+        const response = await axios.post(`${BASE_URL}${GEMINI_API_KEY}`, payload, { timeout: 60000 });
         
-        if (aiText) {
-            const result = cleanAndParseJSON(aiText);
-            if (result) return result;
+        if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            let content = response.data.candidates[0].content.parts[0].text;
+            content = content.trim().replace('```json', '').replace('```', '');
+            return JSON.parse(content);
+        } else {
+            console.error("Invalid response structure from Gemini API:", response.data);
+            throw new Error("Invalid response structure from Gemini.");
         }
-
-        throw new Error("Invalid or empty response from AI");
-
     } catch (error) {
-        console.error("Gemini API Error:", error.response?.data || error.message);
-        return {
-            extracted_info: { reference_number: "Not Found", amount: "Not Found" },
-            verification_status: "REJECTED",
-            reasoning: "The AI system failed to read the receipt. Please contact admin."
-        };
+        const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+        console.error(`Gemini request failed:`, errorMessage);
+        throw new Error(errorMessage);
     }
 }
 
-module.exports = { encodeImage, analyzeReceiptWithFallback };
+function createErrorJson(reason) {
+    return {
+        extracted_info: {},
+        verification_status: "FLAGGED",
+        reasoning: `Script Error: ${reason}`
+    };
+}
+
+// --- Primary API (Norch Project) ---
+async function sendNorchRequest(imageUrl) {
+    console.log("Attempting analysis with Primary API (Norch)...");
+    
+    // Updated parameter names based on your cURL example: prompt and imageurl
+    const encodedPrompt = encodeURIComponent(PRIMARY_ANALYSIS_PROMPT);
+    const encodedImageUrl = encodeURIComponent(imageUrl);
+    
+    // New API Endpoint
+    const API_URL = `https://norch-project.gleeze.com/api/gemini?prompt=${encodedPrompt}&imageurl=${encodedImageUrl}`;
+
+    try {
+        const response = await axios.get(API_URL, { timeout: 45000 });
+
+        console.log(`[Norch API] Raw response received.`);
+
+        if (!response.data || !response.data.response) {
+            throw new Error(`Norch-API responded with an error or invalid format.`);
+        }
+
+        const rawText = response.data.response;
+        
+        // Find JSON object within the text response using Regex
+        const jsonMatch = rawText.match(/({[\s\S]*})/);
+        if (jsonMatch && jsonMatch[0]) {
+            const parsedJson = JSON.parse(jsonMatch[0]);
+            if (parsedJson.verification_status && parsedJson.extracted_info) {
+                console.log("Primary API (Norch) analysis successful.");
+                return parsedJson;
+            }
+        }
+        
+        console.error("Raw text from Norch:", rawText);
+        throw new Error("Response from Norch-API did not contain a valid JSON object.");
+
+    } catch (error) {
+        console.error("Primary API (Norch) request failed:", error.message);
+        throw error; // Propagate the error to trigger the fallback
+    }
+}
+
+async function analyzeReceiptWithFallback(imageUrl, image_b64) {
+    try {
+        // Try Norch (Primary)
+        const primaryResult = await sendNorchRequest(imageUrl);
+        return primaryResult;
+    } catch (primaryError) {
+        console.warn("Primary API (Norch) failed. Proceeding to Fallback API (Gemini)...");
+        try {
+            // Try Google Gemini (Fallback)
+            const fallbackResult = await sendGeminiRequest(image_b64);
+            return fallbackResult;
+        } catch (fallbackError) {
+            console.error("Fallback API (Gemini) also failed. Analysis could not be completed.");
+            return createErrorJson("Both primary and fallback analysis APIs failed.");
+        }
+    }
+}
+
+module.exports = {
+    encodeImage,
+    analyzeReceiptWithFallback
+};
