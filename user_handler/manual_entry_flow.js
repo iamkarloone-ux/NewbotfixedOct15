@@ -4,11 +4,7 @@ const stateManager = require('../state_manager');
 const messengerApi = require('../messenger_api');
 const lang = require('../language_manager');
 
-/**
- * FIXED: Removed the unused 'sendText' parameter from the function signature.
- * It now correctly matches the call from index.js: (sender_psid, imageUrl, userLang)
- */
-async function startManualEntryFlow(sender_psid, imageUrl, userLang = 'en') {
+async function startManualEntryFlow(sender_psid, sendText, imageUrl, userLang = 'en') {
     const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
     await messengerApi.sendQuickReplies(sender_psid, lang.getText('manual_entry_start', userLang), replies);
     stateManager.setUserState(sender_psid, 'awaiting_manual_ref', { imageUrl, lang: userLang });
@@ -51,14 +47,7 @@ async function handleManualModSelection(sender_psid, text, sendImage, ADMIN_ID, 
         const userName = await messengerApi.getUserProfile(sender_psid);
         const adminNotification = `⚠️ MANUAL REGISTRATION (AI FAILED) ⚠️\nUser: ${userName}\nRef No: ${refNumber}\nMod: ${mod.name}\nReceipt attached.`;
         await messengerApi.sendText(ADMIN_ID, adminNotification);
-        
-        // Use the imported sendImage if available, otherwise use messengerApi version
-        if (typeof sendImage === 'function') {
-            await sendImage(ADMIN_ID, imageUrl);
-        } else {
-            await messengerApi.sendImage(ADMIN_ID, imageUrl);
-        }
-        
+        await sendImage(ADMIN_ID, imageUrl);
     } catch (e) {
         if (e.message === 'Duplicate reference number') {
             await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
@@ -70,8 +59,10 @@ async function handleManualModSelection(sender_psid, text, sendImage, ADMIN_ID, 
     stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 }
 
+
 module.exports = {
     startManualEntryFlow,
     handleManualReference,
     handleManualModSelection,
 };
+ 
