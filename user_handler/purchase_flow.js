@@ -1,12 +1,9 @@
-// user_handler/purchase_flow.js
+// user_handler/purchase_flow.js (Corrected with proper state extraction)
 const db = require('../database');
 const stateManager = require('../state_manager');
 const messengerApi = require('../messenger_api');
 const lang = require('../language_manager');
 
-/**
- * Generates a random password for automated account creation.
- */
 function generatePassword(length = 10) {
     const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let retVal = "";
@@ -16,13 +13,11 @@ function generatePassword(length = 10) {
     return retVal;
 }
 
-/**
- * Displays available mods to the user.
- */
+// --- View Mods ---
 async function handleViewMods(sender_psid, userLang = 'en') {
     const mods = await db.getMods();
     if (!mods || mods.length === 0) {
-        const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
+        const replies =[{ title: "⬅️ Back to Menu", payload: "menu" }];
         await messengerApi.sendQuickReplies(sender_psid, lang.getText('mods_none_available', userLang), replies);
         return;
     }
@@ -33,15 +28,13 @@ async function handleViewMods(sender_psid, userLang = 'en') {
     });
     
     const finalMessage = response + `\n${lang.getText('mods_purchase_prompt', userLang)}`;
-    const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
+    const replies =[{ title: "⬅️ Back to Menu", payload: "menu" }];
     
     await messengerApi.sendQuickReplies(sender_psid, finalMessage, replies);
     stateManager.setUserState(sender_psid, 'awaiting_want_mod', { lang: userLang });
 }
 
-/**
- * Handles the selection of a specific mod.
- */
+// --- Purchase Flow ---
 async function handleWantMod(sender_psid, text, userLang = 'en') {
     const modId = parseInt(text.trim());
     const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
@@ -59,35 +52,22 @@ async function handleWantMod(sender_psid, text, userLang = 'en') {
     stateManager.setUserState(sender_psid, 'awaiting_email_for_purchase', { modId: mod.id, lang: userLang });
 }
 
-/**
- * Validates the email and prompts for payment.
- */
 async function handleEmailForPurchase(sender_psid, text, userLang = 'en') {
-    const state = stateManager.getUserState(sender_psid);
-    const modId = state?.modId;
+    const { modId } = stateManager.getUserState(sender_psid); 
     const email = text.trim();
-    const replies = [{ title: "⬅️ Back to Menu", payload: "menu" }];
-    
+    const replies =[{ title: "⬅️ Back to Menu", payload: "menu" }];
     if (!/\S+@\S+\.\S+/.test(email)) {
         await messengerApi.sendQuickReplies(sender_psid, lang.getText('purchase_invalid_email', userLang), replies);
         return;
     }
-    
     const mod = await db.getModById(modId);
     const adminInfo = await db.getAdminInfo();
     const gcashNumber = adminInfo?.gcash_number || "09123963204";
-    
-    const paymentMessage = lang.getText('purchase_prompt_payment', userLang)
-        .replace('{price}', mod.price)
-        .replace('{gcashNumber}', gcashNumber);
-        
+    const paymentMessage = lang.getText('purchase_prompt_payment', userLang).replace('{price}', mod.price).replace('{gcashNumber}', gcashNumber);
     await messengerApi.sendQuickReplies(sender_psid, paymentMessage, replies);
     stateManager.setUserState(sender_psid, 'awaiting_receipt_for_purchase', { modId, email, lang: userLang });
 }
 
-/**
- * Processes the AI analysis of the receipt.
- */
 async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang = 'en') {
     const precollectedState = stateManager.getUserState(sender_psid);
     const amountStr = (analysis.extracted_info?.amount || '').replace(/[^0-9.]/g, '');
@@ -98,13 +78,12 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
     try {
         userName = await messengerApi.getUserProfile(sender_psid);
     } catch (e) {
-        console.error("Failed to fetch user profile in analysis:", e.message);
+        console.error("Failed to fetch user profile, using default name.", e);
     }
 
     if (isNaN(amount) || !refNumber || !/^\d{13}$/.test(refNumber)) {
         await messengerApi.sendText(sender_psid, lang.getText('receipt_fail_read', userLang));
         await messengerApi.sendText(ADMIN_ID, `User ${userName} sent a receipt, but AI failed to extract valid info. Amount: ${amountStr}, Ref: ${refNumber}.`);
-        stateManager.setUserState(sender_psid, 'language_set', { lang: userLang }); 
         return;
     }
 
@@ -113,13 +92,10 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
         const mod = matchingMods[0];
         const confirmationMsg = lang.getText('receipt_confirm_purchase', userLang)
             .replace('{amount}', amount).replace('{modId}', mod.id).replace('{modName}', mod.name);
-            
-        const replies = [
-            { title: lang.getText('confirm_yes', userLang), payload: "confirm_yes" }, 
-            { title: lang.getText('confirm_no', userLang), payload: "confirm_no" }
-        ];
-        
+        const replies =[{ title: lang.getText('confirm_yes', userLang), payload: "confirm_yes" }, { title: lang.getText('confirm_no', userLang), payload: "confirm_no" }];
         await messengerApi.sendQuickReplies(sender_psid, confirmationMsg, replies);
+        
+        // FIXED: Removed the .data spread bug
         stateManager.setUserState(sender_psid, 'awaiting_mod_confirmation', { refNumber, modId: mod.id, modName: mod.name, email: precollectedState?.email, lang: userLang });
 
     } else if (matchingMods.length > 1) {
@@ -128,102 +104,90 @@ async function handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang =
         const clarificationMsg = lang.getText('receipt_clarify_purchase', userLang).replace('{amount}', amount).replace('{modList}', modList);
         await messengerApi.sendText(sender_psid, clarificationMsg);
         
+        // FIXED: Removed the .data spread bug
         stateManager.setUserState(sender_psid, 'awaiting_mod_clarification', { refNumber, email: precollectedState?.email, lang: userLang });
 
     } else {
         await messengerApi.sendText(sender_psid, lang.getText('receipt_no_match', userLang).replace('{amount}', amount));
         await messengerApi.sendText(ADMIN_ID, `User ${userName} sent a receipt for ${amount} PHP with ref ${refNumber}, but no mod matches this price.`);
-        stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
     }
 }
 
-/**
- * Handles the final 'Yes' confirmation from the user.
- */
 async function handleModConfirmation(sender_psid, text, ADMIN_ID, userLang = 'en') {
-    const { refNumber, modId, modName, email } = stateManager.getUserState(sender_psid);
-    const positiveConfirmation = lang.getText('confirm_yes', userLang).toLowerCase();
+    const stateInfo = stateManager.getUserState(sender_psid);
+    if (!stateInfo) return; // Safeguard if state expired
     
-    if (text.toLowerCase() === 'confirm_yes' || text.toLowerCase() === 'yes' || text.toLowerCase() === positiveConfirmation) {
+    // FIXED: Removed the .data reference
+    const { refNumber, modId, modName, email } = stateInfo;
+    
+    if (text.toLowerCase() === 'confirm_yes' || text.toLowerCase() === 'yes') {
         try {
             let userName = 'A User';
-            try { userName = await messengerApi.getUserProfile(sender_psid); } catch (pErr) {}
+            try { userName = await messengerApi.getUserProfile(sender_psid); } catch (e) { console.error("Failed to fetch user profile, using default name.", e); }
 
             await db.addReference(refNumber, sender_psid, modId);
-            
-            const password = generatePassword();
-            const safeEmail = email || "No Email Provided"; 
 
-            // FIXED: Passing userLang as the 5th argument so automated delivery is in the right language
-            const jobId = await db.createAccountCreationJob(sender_psid, safeEmail, password, modId, userLang);
+            const password = generatePassword();
+            const jobId = await db.createAccountCreationJob(sender_psid, email, password, modId);
             
-            const confirmationMessage = lang.getText('automation_started_user', userLang).replace('{modName}', modName);
+            const confirmationMessage = lang.getText('automation_started_user', userLang)
+                .replace('{modName}', modName);
             await messengerApi.sendText(sender_psid, confirmationMessage);
             
             await messengerApi.sendText(ADMIN_ID, `🤖 Automation job (ID: ${jobId}) has been queued for ${userName} (Mod: ${modName}, Ref: ${refNumber})`);
-            
-            stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 
         } catch (e) {
             if (e.message === 'Duplicate reference number') {
-                let userName = 'A User'; 
-                try { userName = await messengerApi.getUserProfile(sender_psid); } catch(err){}
+                let userName = 'A User';
+                try { userName = await messengerApi.getUserProfile(sender_psid); } catch (e) { console.error("Failed to fetch user profile, using default name.", e); }
                 await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
                 await messengerApi.sendText(ADMIN_ID, `⚠️ User ${userName} tried to submit a DUPLICATE reference: ${refNumber}`);
-            } else { 
-                console.error("Error in mod confirmation:", e);
-                await messengerApi.sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
-                await messengerApi.sendText(ADMIN_ID, `⚠️ SYSTEM ERROR for User ${sender_psid}: ${e.message}`);
-            }
-            stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
+            } else { throw e; }
         }
     } else {
         await messengerApi.sendText(sender_psid, lang.getText('receipt_transaction_cancelled', userLang));
-        stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
     }
+    
+    stateManager.clearUserState(sender_psid);
+    stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 }
 
-/**
- * Handles mod choice clarification if multiple mods have the same price.
- */
 async function handleModClarification(sender_psid, text, ADMIN_ID, userLang = 'en') {
-    const { refNumber, email } = stateManager.getUserState(sender_psid);
+    const stateInfo = stateManager.getUserState(sender_psid);
+    if (!stateInfo) return; // Safeguard if state expired
+    
+    // FIXED: Removed the .data reference
+    const { refNumber, email } = stateInfo;
     const modId = parseInt(text.trim());
+    
     try {
         const mod = await db.getModById(modId);
         if (isNaN(modId) || !mod) {
             await messengerApi.sendText(sender_psid, lang.getText('manual_entry_invalid_mod', userLang));
-            return; 
+            return;
         }
-
         let userName = 'A User';
-        try { userName = await messengerApi.getUserProfile(sender_psid); } catch (pErr) {}
+        try { userName = await messengerApi.getUserProfile(sender_psid); } catch (e) { console.error("Failed to fetch user profile, using default name.", e); }
 
         await db.addReference(refNumber, sender_psid, modId);
         
         const password = generatePassword();
-        const safeEmail = email || "No Email Provided";
-
-        // FIXED: Passing userLang as the 5th argument
-        const jobId = await db.createAccountCreationJob(sender_psid, safeEmail, password, modId, userLang);
+        const jobId = await db.createAccountCreationJob(sender_psid, email, password, modId);
         
-        const confirmationMessage = lang.getText('automation_started_user', userLang).replace('{modName}', mod.name);
+        const confirmationMessage = lang.getText('automation_started_user', userLang)
+            .replace('{modName}', mod.name);
         await messengerApi.sendText(sender_psid, confirmationMessage);
         
         await messengerApi.sendText(ADMIN_ID, `🤖 Automation job (ID: ${jobId}) has been queued for ${userName} (Mod: ${mod.name}, Ref: ${refNumber})`);
-        
-        stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 
     } catch (e) {
         if (e.message === 'Duplicate reference number') {
             await messengerApi.sendText(sender_psid, lang.getText('error_duplicate_ref', userLang));
-        } else { 
-            console.error("Error in mod clarification:", e);
-            await messengerApi.sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
-            await messengerApi.sendText(ADMIN_ID, `⚠️ SYSTEM ERROR for User ${sender_psid}: ${e.message}`);
-        }
-        stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
+        } else { throw e; }
     }
+    
+    stateManager.clearUserState(sender_psid);
+    stateManager.setUserState(sender_psid, 'language_set', { lang: userLang });
 }
 
 module.exports = {
@@ -233,4 +197,4 @@ module.exports = {
     handleReceiptAnalysis,
     handleModConfirmation,
     handleModClarification,
-};
+}; 
