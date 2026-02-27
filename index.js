@@ -139,6 +139,7 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
 }
 
 async function handleMessage(sender_psid, webhook_event) {
+    console.log(`[GLOBAL-LOG] Message received from: ${sender_psid}`); // ADD THIS
     try {
         const message = webhook_event.message;
         let received_text = null;
