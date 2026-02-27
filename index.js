@@ -2,6 +2,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios'); // FIXED: Moved axios import to the top
 const dbManager = require('./database.js');
 const stateManager = require('./state_manager.js');
 const userHandler = require('./user_handler');
@@ -10,9 +11,7 @@ const secrets = require('./secrets.js');
 const paymentVerifier = require('./payment_verifier.js');
 const { sendText, sendImage, sendQuickReplies, getUserProfile } = require('./messenger_api.js');
 const lang = require('./language_manager');
-
-// NEW: Import the job poller
-const jobPoller = require('./job_poller.js');
+const { handleUserError } = require('./error_handler.js'); // FIXED: Now properly imported
 
 const app = express();
 app.use(express.json());
@@ -31,59 +30,33 @@ app.post('/webhook-delivery', async (req, res) => {
             console.error("Invalid delivery payload received:", req.body);
             return res.status(400).send('Bad Request: Missing required fields.');
         }
-
         const job = await dbManager.getJobById(job_id);
         if (!job) {
             console.error(`Delivery received for a non-existent Job ID: ${job_id}`);
             return res.status(404).send('Job Not Found');
         }
-
-        // FIXED: Using the lang column we added to the database
-        const deliveryLang = job.lang || 'en';
-        const userMessage = lang.getText('delivery_success', deliveryLang) + `\n\n📧 Username: \`${username}\`\n🔐 Password: \`${password}\`\n\nThank you for your trust! Enjoy! 💙`;
-        
-        try {
-            await sendText(job.user_psid, userMessage);
-            await dbManager.updateJobStatus(job_id, 'delivered', 'Successfully delivered to user.');
-            console.log(`Successfully delivered credentials for Job ID: ${job_id} to user ${job.user_psid}`);
-        
-        } catch (deliveryError) {
-            console.error(`--- FAILED TO DELIVER MESSAGE for Job ID: ${job_id} to user ${job.user_psid} ---`);
-            console.error(deliveryError.message);
-            
-            const resultMsg = `Account created successfully, but delivery failed. User may have blocked the page. Credentials: ${username}:${password}`;
-            await dbManager.updateJobStatus(job_id, 'delivery_failed', resultMsg);
-            
-            await sendText(ADMIN_ID, `🚨 DELIVERY FAILED! 🚨\nJob ID ${job_id} for user ${job.user_psid} was created but could not be delivered. The user may have blocked the page.\n\nAccount Details:\nUsername: ${username}\nPassword: ${password}`);
-        }
-
+        const userMessage = lang.getText('delivery_success', job.lang) + `\n\n📧 Username: \`${username}\`\n🔐 Password: \`${password}\`\n\nThank you for your trust! Enjoy! 💙`;
+        await sendText(job.user_psid, userMessage);
+        await dbManager.updateJobStatus(job_id, 'delivered', 'Successfully delivered to user.');
+        console.log(`Successfully delivered credentials for Job ID: ${job_id} to user ${job.user_psid}`);
         res.status(200).send('OK');
-
     } catch (error) {
-        console.error("--- CRITICAL ERROR in /webhook-delivery ---", error);
+        console.error("--- ERROR in /webhook-delivery ---", error);
+        try {
+            const { job_id } = req.body;
+            if (job_id) {
+                const job = await dbManager.getJobById(job_id);
+                if (job) {
+                    await sendText(job.user_psid, lang.getText('delivery_failed_user', job.lang));
+                    await sendText(ADMIN_ID, `🚨 AUTOMATION DELIVERY FAILED! 🚨\nJob ID ${job_id} for user ${job.user_psid} could not be delivered after creation. Please intervene manually.`);
+                }
+            }
+        } catch (notificationError) {
+            console.error("--- FATAL ERROR in delivery error handler ---", notificationError);
+        }
         res.status(500).send('Internal Server Error');
     }
 });
-
-
-async function handleError(error, sender_psid, context = 'Unknown') {
-    console.error(`--- ERROR ---`);
-    console.error(`Context: ${context}`);
-    console.error(`User PSID: ${sender_psid}`);
-    console.error(error);
-    console.error(`--- END ERROR ---`);
-    try {
-        // FIXED: Using dbManager.getUser which we just added to database.js
-        const user = await dbManager.getUser(sender_psid);
-        const userLang = user?.lang || 'en';
-        const userName = await getUserProfile(sender_psid);
-        const adminMessage = `🚨 AN ERROR OCCURRED 🚨\nContext: ${context}\nUser: ${userName} (${sender_psid})\nError: ${error.message}`;
-        await sendText(ADMIN_ID, adminMessage);
-        await sendText(sender_psid, lang.getText('error_unexpected_user', userLang));
-    } catch (e) {
-        console.error("Fatal error inside the error handler:", e);
-    }
-}
 
 async function handleReceiptSubmission(sender_psid, imageUrl) {
     const userState = stateManager.getUserState(sender_psid);
@@ -93,7 +66,7 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
     console.log(`[RECEIPT-STEP 1] Received image for analysis. URL: ${imageUrl}`);
 
     try {
-        const imageResponse = await require('axios')({ url: imageUrl, responseType: 'arraybuffer' });
+        const imageResponse = await axios({ url: imageUrl, responseType: 'arraybuffer' });
         const imageBuffer = Buffer.from(imageResponse.data, 'binary');
 
         console.log(`[RECEIPT-STEP 2] Successfully downloaded image. Buffer size: ${imageBuffer.length} bytes.`);
@@ -115,8 +88,9 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
         fs.writeFileSync(imagePath, imageBuffer);
 
         const currentStateAfterAnalysis = stateManager.getUserState(sender_psid);
+        
         if (currentStateAfterAnalysis && currentStateAfterAnalysis.state === 'processing_receipt') {
-            if (currentStateAfterAnalysis.data?.orderType) { 
+            if (currentStateAfterAnalysis.orderType) { // FIXED: Removed destructive .data reference
                 await userHandler.handleCustomModReceipt(sender_psid, analysis, sendText, sendImage, ADMIN_ID, imageUrl, userLang);
             } else {
                 await userHandler.handleReceiptAnalysis(sender_psid, analysis, ADMIN_ID, userLang);
@@ -130,16 +104,14 @@ async function handleReceiptSubmission(sender_psid, imageUrl) {
 
         const currentState = stateManager.getUserState(sender_psid);
         if (currentState && currentState.state === 'processing_receipt') {
-            // FIXED: Passing correct arguments to Manual Entry
             await userHandler.startManualEntryFlow(sender_psid, imageUrl, userLang);
         } else {
-            await handleError(error, sender_psid, 'Receipt Submission');
+            await handleUserError(error, sender_psid, userLang, 'Receipt Submission'); // FIXED: Using error_handler
         }
     }
 }
 
 async function handleMessage(sender_psid, webhook_event) {
-    console.log(`[GLOBAL-LOG] Message received from: ${sender_psid}`); // ADD THIS
     try {
         const message = webhook_event.message;
         let received_text = null;
@@ -231,7 +203,7 @@ async function handleMessage(sender_psid, webhook_event) {
                 else if (lowerCaseText === 'lang_tl' || lowerCaseText === 'tagalog') { lang = 'tl'; }
                 else {
                     const langPrompt = "Please select your language:";
-                    const replies = [{ title: "English", payload: "lang_en" }, { title: "Tagalog", payload: "lang_tl" }];
+                    const replies =[{ title: "English", payload: "lang_en" }, { title: "Tagalog", payload: "lang_tl" }];
                     await sendQuickReplies(sender_psid, langPrompt, replies);
                     stateManager.setUserState(sender_psid, 'awaiting_language_choice', {});
                     return;
@@ -257,7 +229,8 @@ async function handleMessage(sender_psid, webhook_event) {
                     const imageUrl = webhook_event.message.attachments[0].payload.url;
 
                     const currentState = stateManager.getUserState(sender_psid);
-                    stateManager.setUserState(sender_psid, 'processing_receipt', { ...(currentState.data || {}), lang: userLang });
+                    const { state: ignoredState, timestamp, ...rest } = currentState || {}; // FIXED: Flatten state properly
+                    stateManager.setUserState(sender_psid, 'processing_receipt', { ...rest, lang: userLang });
                     
                     await handleReceiptSubmission(sender_psid, imageUrl);
                 }
@@ -308,17 +281,15 @@ async function handleMessage(sender_psid, webhook_event) {
             }
         }
     } catch (error) {
-        await handleError(error, sender_psid, 'Master Message Handler');
+        const userStateObjForLang = stateManager.getUserState(sender_psid);
+        const userLang = userStateObjForLang?.lang || 'en';
+        await handleUserError(error, sender_psid, userLang, 'Master Message Handler'); // FIXED: Error Handler
     }
 }
 
 async function startServer() {
     try {
         await dbManager.setupDatabase();
-        
-        // NEW: Start the background job poller
-        jobPoller.start();
-
         app.get('/', (req, res) => { res.status(200).send('Bot is online and healthy.'); });
         app.get('/webhook', (req, res) => {
             const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
@@ -327,17 +298,20 @@ async function startServer() {
                 res.status(200).send(challenge);
             } else { res.sendStatus(403); }
         });
-        app.post('/webhook', (req, res) => {
+        
+        app.post('/webhook', async (req, res) => { // FIXED: Async route
             if (req.body.object === 'page') {
-                req.body.entry.forEach(entry => {
+                // FIXED: Wait for each message to finish processing
+                for (const entry of req.body.entry) {
                     const event = entry.messaging[0];
                     if (event?.sender?.id && (event.message || event.postback)) {
-                        handleMessage(event.sender.id, event);
+                        await handleMessage(event.sender.id, event);
                     }
-                });
+                }
                 res.status(200).send('EVENT_RECEIVED');
             } else { res.sendStatus(404); }
         });
+        
         const PORT = process.env.PORT || 3000;
         const HOST = '0.0.0.0';
         app.listen(PORT, HOST, () => { console.log(`✅ Bot is listening on port ${PORT} at host ${HOST}.`); });
@@ -347,4 +321,4 @@ async function startServer() {
     }
 }
 
-startServer();
+startServer(); 
